@@ -1,12 +1,6 @@
 services:
   trmnl-image-webhook:
-    # Use published image from GitHub Container Registry
-    # To use a specific version, change 'latest' to a version tag like 'v1.0.0'
-    image: ghcr.io/excusemi/trmnl-image-webhook:latest
-
-    # Or build locally (comment out 'image' above and uncomment below)
-    # build: .
-
+    build: .
     container_name: trmnl-image-webhook
     restart: unless-stopped
 
