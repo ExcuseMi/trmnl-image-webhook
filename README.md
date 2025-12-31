@@ -164,7 +164,7 @@ IMAGE_LABEL=path
 docker-compose up -d
 
 # View logs
-docker-compose logs -f
+docker-compose logs -f trmnl-image-webhook
 
 # Stop
 docker-compose down
@@ -172,6 +172,13 @@ docker-compose down
 # Restart after config changes
 docker-compose restart
 ```
+
+One-liner to update and restart the application after setting the .env
+```bash
+git pull && docker compose down && docker compose build && docker compose up -d
+```
+
+
 
 ## Debugging
 
