@@ -36,21 +36,37 @@ class ImageUploader:
                  include_subfolders: bool = True,
                  display_width: int = 800,
                  display_height: int = 480,
-                 bit_depth: int = 1):
+                 layout: str = 'auto',
+                 orientation_filter: str = 'any'):
         self.webhook_url = webhook_url
         self.images_dir = Path(images_dir)
         self.interval_seconds = interval_minutes * 60
         self.selection_mode = selection_mode
         self.include_subfolders = include_subfolders
-        self.display_width = display_width
-        self.display_height = display_height
-        self.bit_depth = bit_depth
+        self.layout = layout
+        self.orientation_filter = orientation_filter
+
+        # Adjust dimensions based on layout
+        if layout == 'portrait':
+            # Swap dimensions for portrait mode
+            self.display_width = min(display_width, display_height)
+            self.display_height = max(display_width, display_height)
+        elif layout == 'landscape':
+            # Ensure landscape (wider than tall)
+            self.display_width = max(display_width, display_height)
+            self.display_height = min(display_width, display_height)
+        else:
+            # Auto - use as configured
+            self.display_width = display_width
+            self.display_height = display_height
+
         self.state = self._load_state()
 
         logger.info(f"Initialized uploader:")
         logger.info(f"  Images directory: {self.images_dir}")
-        logger.info(f"  Display size: {display_width}x{display_height}")
-        logger.info(f"  Bit depth: {bit_depth}-bit")
+        logger.info(f"  Display size: {self.display_width}x{self.display_height}")
+        logger.info(f"  Layout: {layout}")
+        logger.info(f"  Orientation filter: {orientation_filter}")
         logger.info(f"  Upload interval: {interval_minutes} minutes")
         logger.info(f"  Selection mode: {selection_mode}")
         logger.info(f"  Include subfolders: {include_subfolders}")
@@ -97,6 +113,40 @@ class ImageUploader:
         images = sorted(images)
 
         logger.info(f"Found {len(images)} images")
+
+        # Filter by orientation if specified
+        if self.orientation_filter != 'any':
+            filtered_images = []
+            for img_path in images:
+                try:
+                    with Image.open(img_path) as img:
+                        # Apply EXIF rotation to get actual dimensions
+                        from PIL import ImageOps
+                        img = ImageOps.exif_transpose(img)
+                        if img is None:
+                            img = Image.open(img_path)
+
+                        width, height = img.size
+
+                        # Determine if image is landscape or portrait
+                        is_landscape = width > height
+                        is_portrait = height > width
+
+                        # Filter based on setting
+                        if self.orientation_filter == 'landscape' and is_landscape:
+                            filtered_images.append(img_path)
+                        elif self.orientation_filter == 'portrait' and is_portrait:
+                            filtered_images.append(img_path)
+                        # Skip square images and images that don't match filter
+
+                except Exception as e:
+                    logger.debug(f"Could not check orientation of {img_path.name}: {e}")
+                    # Include image if we can't determine orientation
+                    filtered_images.append(img_path)
+
+            logger.info(f"Filtered to {len(filtered_images)} {self.orientation_filter} images")
+            images = filtered_images
+
         return images
 
     def select_next_image(self, images: List[Path]) -> Optional[Path]:
@@ -164,6 +214,13 @@ class ImageUploader:
         """
         try:
             with Image.open(image_path) as img:
+                # Auto-rotate based on EXIF orientation data
+                from PIL import ImageOps
+                img = ImageOps.exif_transpose(img)
+                if img is None:
+                    # If exif_transpose returns None, re-open
+                    img = Image.open(image_path)
+
                 # Convert to RGB first
                 if img.mode == 'RGBA':
                     background = Image.new('RGB', img.size, (255, 255, 255))
@@ -191,95 +248,32 @@ class ImageUploader:
                 if label_mode != 'none':
                     processed = self._add_label(processed, image_path, label_mode)
 
-                # Step 3: Convert to bilevel or 2-bit based on device support
-                # TRMNL only accepts 1-bit or 2-bit PNGs
+                # Step 3: Convert to 1-bit for TRMNL (only 1-bit is supported)
                 use_dither = os.getenv('USE_DITHERING', 'true').lower() == 'true'
 
-                if self.bit_depth == 1:
-                    # 1-bit: Pure black and white
-                    if use_dither:
-                        logger.info(f"  Converting to 1-bit with Floyd-Steinberg dithering")
-                        processed = processed.convert('1', dither=Image.Dither.FLOYDSTEINBERG)
-                    else:
-                        logger.info(f"  Converting to 1-bit without dithering")
-                        processed = processed.convert('1', dither=Image.Dither.NONE)
-
-                    # Save as 1-bit PNG
-                    output = io.BytesIO()
-                    processed.save(output, format='PNG', optimize=True, bits=1)
-
-                elif self.bit_depth == 2:
-                    # 2-bit: 4 shades of gray using Floyd-Steinberg dithering
-                    import numpy as np
-
-                    logger.info(f"  Converting to 2-bit (4 grays) with custom dithering")
-
-                    # Define our 4 gray levels for 2-bit
-                    levels = [0, 85, 170, 255]
-
-                    if use_dither:
-                        # Apply Floyd-Steinberg dithering to 4 levels
-                        img_array = np.array(processed, dtype=np.float32)
-                        height, width = img_array.shape
-
-                        for y in range(height):
-                            for x in range(width):
-                                old_pixel = img_array[y, x]
-
-                                # Find closest gray level
-                                new_pixel = min(levels, key=lambda level: abs(level - old_pixel))
-                                img_array[y, x] = new_pixel
-
-                                # Calculate quantization error
-                                error = old_pixel - new_pixel
-
-                                # Distribute error to neighboring pixels (Floyd-Steinberg)
-                                if x + 1 < width:
-                                    img_array[y, x + 1] += error * 7 / 16
-                                if y + 1 < height:
-                                    if x > 0:
-                                        img_array[y + 1, x - 1] += error * 3 / 16
-                                    img_array[y + 1, x] += error * 5 / 16
-                                    if x + 1 < width:
-                                        img_array[y + 1, x + 1] += error * 1 / 16
-
-                        # Clip values and convert back
-                        img_array = np.clip(img_array, 0, 255).astype(np.uint8)
-                        processed = Image.fromarray(img_array, mode='L')
-                    else:
-                        # No dithering - just snap to nearest level
-                        img_array = np.array(processed, dtype=np.uint8)
-                        for level_idx in range(len(levels)):
-                            if level_idx == 0:
-                                mask = img_array < (levels[0] + levels[1]) / 2
-                            elif level_idx == len(levels) - 1:
-                                mask = img_array >= (levels[-2] + levels[-1]) / 2
-                            else:
-                                mask = (img_array >= (levels[level_idx - 1] + levels[level_idx]) / 2) & \
-                                       (img_array < (levels[level_idx] + levels[level_idx + 1]) / 2)
-                            img_array[mask] = levels[level_idx]
-                        processed = Image.fromarray(img_array, mode='L')
-
-                    # Convert to palette mode with exactly 4 colors
-                    processed = processed.convert('P', palette=Image.Palette.ADAPTIVE, colors=4)
-
-                    # Save as 2-bit PNG
-                    output = io.BytesIO()
-                    processed.save(output, format='PNG', optimize=True, bits=2)
-                else:
-                    logger.error(f"Invalid bit depth: {self.bit_depth}. Using 1-bit.")
+                if use_dither:
+                    logger.info(f"  Converting to 1-bit with Floyd-Steinberg dithering")
                     processed = processed.convert('1', dither=Image.Dither.FLOYDSTEINBERG)
-                    output = io.BytesIO()
-                    processed.save(output, format='PNG', optimize=True, bits=1)
+                else:
+                    logger.info(f"  Converting to 1-bit without dithering")
+                    processed = processed.convert('1', dither=Image.Dither.NONE)
+
+                # Save as 1-bit PNG
+                output = io.BytesIO()
+                processed.save(output, format='PNG', optimize=True, bits=1)
 
                 image_bytes = output.getvalue()
                 size_kb = len(image_bytes) / 1024
 
-                logger.info(
-                    f"  Final: {self.display_width}x{self.display_height} {self.bit_depth}-bit PNG, {size_kb:.1f}KB")
+                logger.info(f"  Final: {self.display_width}x{self.display_height} 1-bit PNG, {size_kb:.1f}KB")
 
-                # ALWAYS save original image for debugging
-                original_path = Path('/data/last_original' + image_path.suffix)
+                # Clean up old original files (removes previous extensions)
+                for old_file in Path('/data').glob('last_original.*'):
+                    old_file.unlink()
+
+                # ALWAYS save original image for debugging (use lowercase extension)
+                ext = image_path.suffix.lower()
+                original_path = Path(f'/data/last_original{ext}')
                 with open(image_path, 'rb') as src:
                     with open(original_path, 'wb') as dst:
                         dst.write(src.read())
@@ -536,7 +530,8 @@ def main():
     include_subfolders = os.getenv('INCLUDE_SUBFOLDERS', 'true').lower() == 'true'
     display_width = int(os.getenv('DISPLAY_WIDTH', '800'))
     display_height = int(os.getenv('DISPLAY_HEIGHT', '480'))
-    bit_depth = int(os.getenv('BIT_DEPTH', '1'))
+    layout = os.getenv('LAYOUT', 'auto').lower()
+    orientation_filter = os.getenv('ORIENTATION_FILTER', 'any').lower()
 
     # Validate configuration
     if not webhook_url:
@@ -556,9 +551,18 @@ def main():
         logger.error(f"Valid modes: {', '.join(valid_modes)}")
         exit(1)
 
-    # Validate bit depth
-    if bit_depth not in [1, 2]:
-        logger.error(f"Invalid BIT_DEPTH: {bit_depth}. Must be 1 or 2.")
+    # Validate layout
+    valid_layouts = ['auto', 'landscape', 'portrait']
+    if layout not in valid_layouts:
+        logger.error(f"Invalid LAYOUT: {layout}")
+        logger.error(f"Valid layouts: {', '.join(valid_layouts)}")
+        exit(1)
+
+    # Validate orientation filter
+    valid_filters = ['any', 'landscape', 'portrait']
+    if orientation_filter not in valid_filters:
+        logger.error(f"Invalid ORIENTATION_FILTER: {orientation_filter}")
+        logger.error(f"Valid filters: {', '.join(valid_filters)}")
         exit(1)
 
     # Create and run uploader
@@ -570,7 +574,8 @@ def main():
         include_subfolders=include_subfolders,
         display_width=display_width,
         display_height=display_height,
-        bit_depth=bit_depth
+        layout=layout,
+        orientation_filter=orientation_filter
     )
 
     uploader.run()
