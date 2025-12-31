@@ -343,7 +343,7 @@ class ImageUploader:
     def _process_single_image(self, img: Image.Image) -> Image.Image:
         """
         Scale image to fit display while maintaining aspect ratio
-        Centers on white background
+        Centers with configurable border style
         ALWAYS returns exactly display_width x display_height
         """
         # Calculate scaling to fit within display
@@ -362,8 +362,21 @@ class ImageUploader:
         # Resize image with high quality
         img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
-        # Create white background at EXACT display size
-        canvas = Image.new('RGB', (self.display_width, self.display_height), (255, 255, 255))
+        # Get border style
+        border_style = os.getenv('BORDER_STYLE', 'white').lower()
+
+        # Create canvas based on border style
+        if border_style == 'black':
+            # Black borders for classic framing
+            canvas = Image.new('RGB', (self.display_width, self.display_height), (0, 0, 0))
+        elif border_style == 'blur':
+            # Blurred background - scale original to fill, blur heavily
+            canvas = img.resize((self.display_width, self.display_height), Image.Resampling.LANCZOS)
+            from PIL import ImageFilter
+            canvas = canvas.filter(ImageFilter.GaussianBlur(radius=20))
+        else:
+            # White borders (default, clean look)
+            canvas = Image.new('RGB', (self.display_width, self.display_height), (255, 255, 255))
 
         # Center image on canvas
         x_offset = (self.display_width - new_width) // 2
