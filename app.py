@@ -23,6 +23,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Current version
+CURRENT_VERSION = "1.0.0"
+VERSION_CHECK_URL = "https://api.github.com/repos/ExcuseMi/trmnl-image-webhook/releases/latest"
+
+
+def check_for_updates():
+    """Check if a newer version is available"""
+    try:
+        response = requests.get(VERSION_CHECK_URL, timeout=5)
+        if response.status_code == 200:
+            latest = response.json()
+            latest_version = latest.get('tag_name', '').lstrip('v')
+
+            if latest_version and latest_version != CURRENT_VERSION:
+                logger.warning("=" * 70)
+                logger.warning(f"UPDATE AVAILABLE: v{latest_version} (you have v{CURRENT_VERSION})")
+                logger.warning(f"Release notes: {latest.get('html_url', '')}")
+                logger.warning("Update: docker pull ghcr.io/excusemi/trmnl-image-webhook:latest")
+                logger.warning("=" * 70)
+    except Exception:
+        # Silently fail - don't block startup for version check
+        pass
+
 
 class ImageUploader:
     SUPPORTED_FORMATS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif'}
@@ -535,6 +558,9 @@ class ImageUploader:
 
 
 def main():
+    # Check for updates
+    check_for_updates()
+
     # Get configuration from environment variables
     webhook_url = os.getenv('WEBHOOK_URL')
     images_dir = os.getenv('IMAGES_DIR', '/images')
