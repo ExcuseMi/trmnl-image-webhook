@@ -14,8 +14,9 @@ RUN pip install --no-cache-dir requests Pillow
 # Create directories
 RUN mkdir -p /images /data
 
-# Copy application
+# Copy application files
 COPY app.py /app/app.py
+COPY VERSION /app/VERSION
 RUN chmod +x /app/app.py
 
 # Set working directory

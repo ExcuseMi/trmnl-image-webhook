@@ -23,8 +23,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Current version
-CURRENT_VERSION = "1.0.1"
+
+# Read version from VERSION file
+def get_version():
+    """Read version from VERSION file"""
+    try:
+        version_file = Path(__file__).parent / 'VERSION'
+        if version_file.exists():
+            return version_file.read_text().strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+CURRENT_VERSION = get_version()
 VERSION_CHECK_URL = "https://api.github.com/repos/ExcuseMi/trmnl-image-webhook/releases/latest"
 
 
