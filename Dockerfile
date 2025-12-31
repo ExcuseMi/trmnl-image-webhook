@@ -1,7 +1,7 @@
 FROM python:3.14-slim
 
 # Install dependencies
-RUN pip install --no-cache-dir requests Pillow numpy
+RUN pip install --no-cache-dir requests Pillow
 
 # Create directories
 RUN mkdir -p /images /data
