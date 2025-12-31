@@ -65,8 +65,8 @@ That's it! Your TRMNL will start showing photos from your collection.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DISPLAY_WIDTH` | `800` | Display width (OG: 800, Plus: 1280) |
-| `DISPLAY_HEIGHT` | `480` | Display height (OG: 480, Plus: 800) |
+| `DISPLAY_WIDTH` | `800` | Display width (OG: 800) |
+| `DISPLAY_HEIGHT` | `480` | Display height (OG: 480) |
 | `INTERVAL_MINUTES` | `60` | Minutes between uploads |
 | `SELECTION_MODE` | `random` | How to pick images (see below) |
 | `INCLUDE_SUBFOLDERS` | `true` | Include images from subdirectories |
@@ -94,30 +94,6 @@ Example with label:
 ```bash
 IMAGE_LABEL=path
 ```
-
-## Image Processing
-
-### What Happens to Your Photos
-
-1. **Scaling** - Resized to fit display (800x480 or 1280x800)
-2. **Grayscale** - Converted to grayscale
-3. **Dithering** - Floyd-Steinberg dithering applied for smooth gradients
-4. **1-bit Conversion** - Pure black and white (2 colors)
-5. **PNG Export** - Optimized 1-bit PNG (~20-40KB)
-
-### Why Dithering?
-
-TRMNL displays are 1-bit (pure black and white). Dithering creates the illusion of grayscale by using patterns of black and white dots - like newspaper photos. This makes photos look much better than simple thresholding.
-
-**With dithering:**
-- Smooth gradients in sky, skin tones, etc.
-- Details visible in shadows and highlights
-- Professional halftone appearance
-
-**Without dithering:**
-- Harsh black/white contrast
-- Loss of detail
-- Posterized look
 
 ## Examples
 
