@@ -24,7 +24,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Current version
-CURRENT_VERSION = "1.0.0"
+CURRENT_VERSION = "1.0.1"
 VERSION_CHECK_URL = "https://api.github.com/repos/ExcuseMi/trmnl-image-webhook/releases/latest"
 
 
