@@ -19,14 +19,16 @@ Automatically upload images from your photo collection to your TRMNL e-ink displ
 ### 1. Get Your Webhook URL
 
 1. Log into [TRMNL](https://usetrmnl.com)
-2. Go to Plugins > Webhook Image
-3. Click "Add to my plugins"
-4. Copy your webhook URL
+2. Go to [Plugins > Webhook Image](https://usetrmnl.com/plugin_settings?keyname=webhook_image)
+3. Click "Add new"
+4. Save with a name as you want
+5. Copy your webhook URL
 
 ### 2. Set Up Configuration
 
 ```bash
-# Clone or download this repository
+git clone https://github.com/ExcuseMi/trmnl-image-webhook.git
+
 cd trmnl-image-webhook
 
 # Copy example config
@@ -199,23 +201,11 @@ docker-compose restart
 - Set `INCLUDE_SUBFOLDERS=true` if images are in subdirectories
 - Verify image formats (PNG, JPG, JPEG, BMP, GIF supported)
 
-**Images not displaying on TRMNL**
-
-- Check device WiFi connection
-- Verify webhook URL is correct
-- Try "Force Refresh" in TRMNL plugin settings
-- Check `data/last_processed.png` looks correct
 
 **Rate limited (429 error)**
 
 - TRMNL allows max 12 uploads per hour
 - Increase `INTERVAL_MINUTES` to 60 or higher
-
-**Upload rejected (422 error)**
-
-- Image may be corrupted
-- File over 5MB limit (shouldn't happen with processing)
-- Try different source image
 
 ## Technical Details
 
