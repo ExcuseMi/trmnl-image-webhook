@@ -173,59 +173,7 @@ docker-compose down
 docker-compose restart
 ```
 
-### Synology NAS
-
-1. Enable Docker in Package Center
-2. Upload project folder to your NAS
-3. Edit `.env` with your settings
-4. SSH into NAS:
-```bash
-cd /volume1/docker/trmnl-image-webhook
-docker-compose up -d
-```
-
-### Raspberry Pi
-
-```bash
-# Install Docker
-curl -fsSL https://get.docker.com | sh
-
-# Clone and configure
-git clone <repo-url>
-cd trmnl-image-webhook
-cp .env.example .env
-nano .env
-
-# Run
-docker-compose up -d
-```
-
 ## Debugging
-
-### Check Logs
-
-```bash
-docker-compose logs -f
-```
-
-Look for:
-```
-Found X images
-Converting to grayscale
-Converting to 1-bit with Floyd-Steinberg dithering  
-Final: 800x480 1-bit PNG, 25.3KB
-✓ Successfully uploaded image.jpg
-Response: 200
-```
-
-### Inspect Processed Images
-
-Every upload saves two files to `./data/`:
-
-- `last_original.jpg` - Original unprocessed photo
-- `last_processed.png` - Final 1-bit dithered PNG sent to TRMNL
-
-Compare these to see exactly what's being displayed.
 
 ### Dry Run Mode
 
@@ -269,11 +217,6 @@ docker-compose restart
 Input: PNG, JPEG, JPG, BMP, GIF
 Output: 1-bit PNG
 
-### File Sizes
-
-- Input: Any size (auto-scaled)
-- Output: ~15-40KB (1-bit PNG)
-- Limit: 5MB (rarely reached)
 
 ### Display Sizes
 
@@ -283,23 +226,6 @@ DISPLAY_WIDTH=800
 DISPLAY_HEIGHT=480
 ```
 
-**TRMNL Plus:**
-```bash
-DISPLAY_WIDTH=1280
-DISPLAY_HEIGHT=800
-```
-
-### State Management
-
-For `sequential` and `shuffle` modes, position is saved in `./data/state.json`:
-
-```json
-{
-  "last_image": "vacation/photo.jpg",
-  "current_index": 42,
-  "last_upload": "2024-12-31T16:20:57"
-}
-```
 
 ## Requirements
 
