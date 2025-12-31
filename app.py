@@ -1,0 +1,580 @@
+#!/usr/bin/env python3
+"""
+TRMNL Image Webhook Uploader
+Automatically uploads images from a directory to your TRMNL display
+"""
+
+import os
+import io
+import time
+import json
+import random
+import logging
+import requests
+from pathlib import Path
+from typing import List, Optional, Tuple
+from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+class ImageUploader:
+    SUPPORTED_FORMATS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif'}
+    STATE_FILE = '/data/state.json'
+
+    def __init__(self,
+                 webhook_url: str,
+                 images_dir: str,
+                 interval_minutes: int,
+                 selection_mode: str = 'random',
+                 include_subfolders: bool = True,
+                 display_width: int = 800,
+                 display_height: int = 480,
+                 bit_depth: int = 1):
+        self.webhook_url = webhook_url
+        self.images_dir = Path(images_dir)
+        self.interval_seconds = interval_minutes * 60
+        self.selection_mode = selection_mode
+        self.include_subfolders = include_subfolders
+        self.display_width = display_width
+        self.display_height = display_height
+        self.bit_depth = bit_depth
+        self.state = self._load_state()
+
+        logger.info(f"Initialized uploader:")
+        logger.info(f"  Images directory: {self.images_dir}")
+        logger.info(f"  Display size: {display_width}x{display_height}")
+        logger.info(f"  Bit depth: {bit_depth}-bit")
+        logger.info(f"  Upload interval: {interval_minutes} minutes")
+        logger.info(f"  Selection mode: {selection_mode}")
+        logger.info(f"  Include subfolders: {include_subfolders}")
+
+    def _load_state(self) -> dict:
+        """Load state from file or create new state"""
+        try:
+            if os.path.exists(self.STATE_FILE):
+                with open(self.STATE_FILE, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not load state file: {e}")
+
+        return {
+            'last_image': None,
+            'current_index': 0,
+            'shuffle_order': [],
+            'last_upload': None
+        }
+
+    def _save_state(self):
+        """Save current state to file"""
+        try:
+            os.makedirs(os.path.dirname(self.STATE_FILE), exist_ok=True)
+            with open(self.STATE_FILE, 'w') as f:
+                json.dump(self.state, f, indent=2)
+        except Exception as e:
+            logger.error(f"Could not save state file: {e}")
+
+    def get_image_files(self) -> List[Path]:
+        """Get all supported image files from directory"""
+        images = []
+
+        if self.include_subfolders:
+            for ext in self.SUPPORTED_FORMATS:
+                images.extend(self.images_dir.rglob(f'*{ext}'))
+                images.extend(self.images_dir.rglob(f'*{ext.upper()}'))
+        else:
+            for ext in self.SUPPORTED_FORMATS:
+                images.extend(self.images_dir.glob(f'*{ext}'))
+                images.extend(self.images_dir.glob(f'*{ext.upper()}'))
+
+        # Sort for consistent ordering
+        images = sorted(images)
+
+        logger.info(f"Found {len(images)} images")
+        return images
+
+    def select_next_image(self, images: List[Path]) -> Optional[Path]:
+        """Select next image based on selection mode"""
+        if not images:
+            logger.warning("No images found in directory")
+            return None
+
+        if self.selection_mode == 'random':
+            return random.choice(images)
+
+        elif self.selection_mode == 'sequential':
+            # Get current index, wrap around if needed
+            index = self.state.get('current_index', 0)
+            if index >= len(images):
+                index = 0
+
+            selected = images[index]
+            self.state['current_index'] = (index + 1) % len(images)
+            return selected
+
+        elif self.selection_mode == 'shuffle':
+            # Create new shuffle order if needed
+            image_names = [str(img.relative_to(self.images_dir)) for img in images]
+
+            if (not self.state.get('shuffle_order') or
+                    set(self.state['shuffle_order']) != set(image_names)):
+                # New images or first run - create shuffle order
+                self.state['shuffle_order'] = image_names.copy()
+                random.shuffle(self.state['shuffle_order'])
+                self.state['current_index'] = 0
+                logger.info("Created new shuffle order")
+
+            # Get next image from shuffle order
+            index = self.state.get('current_index', 0)
+            if index >= len(self.state['shuffle_order']):
+                # End of shuffle - reshuffle
+                random.shuffle(self.state['shuffle_order'])
+                index = 0
+                logger.info("Reshuffled images")
+
+            selected_name = self.state['shuffle_order'][index]
+            selected = self.images_dir / selected_name
+
+            self.state['current_index'] = index + 1
+            return selected
+
+        elif self.selection_mode == 'newest':
+            # Sort by modification time, newest first
+            return max(images, key=lambda x: x.stat().st_mtime)
+
+        elif self.selection_mode == 'oldest':
+            # Sort by modification time, oldest first
+            return min(images, key=lambda x: x.stat().st_mtime)
+
+        else:
+            logger.error(f"Unknown selection mode: {self.selection_mode}")
+            return random.choice(images)
+
+    def process_image(self, image_path: Path) -> Tuple[bytes, str]:
+        """
+        Process image for TRMNL e-ink display
+        Matches TRMNL's own processing: grayscale → optional dithering → bilevel
+        Returns: (image_bytes, content_type)
+        """
+        try:
+            with Image.open(image_path) as img:
+                # Convert to RGB first
+                if img.mode == 'RGBA':
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    background.paste(img, mask=img.split()[3])
+                    img = background
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+
+                # Scale to fit display (always use 'single' mode for simplicity)
+                processed = self._process_single_image(img)
+
+                # Ensure exact dimensions
+                if processed.size != (self.display_width, self.display_height):
+                    processed = processed.resize(
+                        (self.display_width, self.display_height),
+                        Image.Resampling.LANCZOS
+                    )
+
+                # Step 1: Convert to grayscale
+                logger.info(f"  Converting to grayscale")
+                processed = processed.convert('L')
+
+                # Step 2: Optional label
+                label_mode = os.getenv('IMAGE_LABEL', 'none').lower()
+                if label_mode != 'none':
+                    processed = self._add_label(processed, image_path, label_mode)
+
+                # Step 3: Convert to bilevel or 2-bit based on device support
+                # TRMNL only accepts 1-bit or 2-bit PNGs
+                use_dither = os.getenv('USE_DITHERING', 'true').lower() == 'true'
+
+                if self.bit_depth == 1:
+                    # 1-bit: Pure black and white
+                    if use_dither:
+                        logger.info(f"  Converting to 1-bit with Floyd-Steinberg dithering")
+                        processed = processed.convert('1', dither=Image.Dither.FLOYDSTEINBERG)
+                    else:
+                        logger.info(f"  Converting to 1-bit without dithering")
+                        processed = processed.convert('1', dither=Image.Dither.NONE)
+
+                    # Save as 1-bit PNG
+                    output = io.BytesIO()
+                    processed.save(output, format='PNG', optimize=True, bits=1)
+
+                elif self.bit_depth == 2:
+                    # 2-bit: 4 shades of gray using Floyd-Steinberg dithering
+                    import numpy as np
+
+                    logger.info(f"  Converting to 2-bit (4 grays) with custom dithering")
+
+                    # Define our 4 gray levels for 2-bit
+                    levels = [0, 85, 170, 255]
+
+                    if use_dither:
+                        # Apply Floyd-Steinberg dithering to 4 levels
+                        img_array = np.array(processed, dtype=np.float32)
+                        height, width = img_array.shape
+
+                        for y in range(height):
+                            for x in range(width):
+                                old_pixel = img_array[y, x]
+
+                                # Find closest gray level
+                                new_pixel = min(levels, key=lambda level: abs(level - old_pixel))
+                                img_array[y, x] = new_pixel
+
+                                # Calculate quantization error
+                                error = old_pixel - new_pixel
+
+                                # Distribute error to neighboring pixels (Floyd-Steinberg)
+                                if x + 1 < width:
+                                    img_array[y, x + 1] += error * 7 / 16
+                                if y + 1 < height:
+                                    if x > 0:
+                                        img_array[y + 1, x - 1] += error * 3 / 16
+                                    img_array[y + 1, x] += error * 5 / 16
+                                    if x + 1 < width:
+                                        img_array[y + 1, x + 1] += error * 1 / 16
+
+                        # Clip values and convert back
+                        img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+                        processed = Image.fromarray(img_array, mode='L')
+                    else:
+                        # No dithering - just snap to nearest level
+                        img_array = np.array(processed, dtype=np.uint8)
+                        for level_idx in range(len(levels)):
+                            if level_idx == 0:
+                                mask = img_array < (levels[0] + levels[1]) / 2
+                            elif level_idx == len(levels) - 1:
+                                mask = img_array >= (levels[-2] + levels[-1]) / 2
+                            else:
+                                mask = (img_array >= (levels[level_idx - 1] + levels[level_idx]) / 2) & \
+                                       (img_array < (levels[level_idx] + levels[level_idx + 1]) / 2)
+                            img_array[mask] = levels[level_idx]
+                        processed = Image.fromarray(img_array, mode='L')
+
+                    # Convert to palette mode with exactly 4 colors
+                    processed = processed.convert('P', palette=Image.Palette.ADAPTIVE, colors=4)
+
+                    # Save as 2-bit PNG
+                    output = io.BytesIO()
+                    processed.save(output, format='PNG', optimize=True, bits=2)
+                else:
+                    logger.error(f"Invalid bit depth: {self.bit_depth}. Using 1-bit.")
+                    processed = processed.convert('1', dither=Image.Dither.FLOYDSTEINBERG)
+                    output = io.BytesIO()
+                    processed.save(output, format='PNG', optimize=True, bits=1)
+
+                image_bytes = output.getvalue()
+                size_kb = len(image_bytes) / 1024
+
+                logger.info(
+                    f"  Final: {self.display_width}x{self.display_height} {self.bit_depth}-bit PNG, {size_kb:.1f}KB")
+
+                # ALWAYS save original image for debugging
+                original_path = Path('/data/last_original' + image_path.suffix)
+                with open(image_path, 'rb') as src:
+                    with open(original_path, 'wb') as dst:
+                        dst.write(src.read())
+                logger.info(f"  Saved original to {original_path}")
+
+                # ALWAYS save processed image for debugging
+                processed_path = Path('/data/last_processed.png')
+                with open(processed_path, 'wb') as f:
+                    f.write(image_bytes)
+                logger.info(f"  Saved processed to {processed_path}")
+
+                return image_bytes, 'image/png'
+
+        except Exception as e:
+            logger.error(f"Error processing image: {e}")
+            logger.error(f"Falling back to original image")
+            with open(image_path, 'rb') as f:
+                return f.read(), 'image/jpeg'
+
+    def _add_label(self, img: Image.Image, image_path: Path, label_mode: str) -> Image.Image:
+        """Add filename or path label to image"""
+        from PIL import ImageDraw, ImageFont
+
+        # Get label text
+        if label_mode == 'filename':
+            label_text = image_path.name
+        elif label_mode == 'path':
+            label_text = str(image_path.relative_to(self.images_dir))
+        else:
+            return img
+
+        # Create a copy to draw on
+        labeled = img.copy()
+        draw = ImageDraw.Draw(labeled)
+
+        # Try to use a nice font, fallback to default
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+        except:
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+            except:
+                font = ImageFont.load_default()
+
+        # Get text size
+        bbox = draw.textbbox((0, 0), label_text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+
+        # Position at bottom with padding
+        padding = 10
+        x = padding
+        y = self.display_height - text_height - padding - 5
+
+        # Draw black background rectangle
+        draw.rectangle(
+            [x - 5, y - 5, x + text_width + 5, y + text_height + 5],
+            fill=0  # Black background
+        )
+
+        # Draw white text
+        draw.text((x, y), label_text, fill=255, font=font)
+
+        logger.info(f"  Added label: {label_text}")
+        return labeled
+
+    def _process_single_image(self, img: Image.Image) -> Image.Image:
+        """
+        Scale image to fit display while maintaining aspect ratio
+        Centers on white background
+        ALWAYS returns exactly display_width x display_height
+        """
+        # Calculate scaling to fit within display
+        img_ratio = img.width / img.height
+        display_ratio = self.display_width / self.display_height
+
+        if img_ratio > display_ratio:
+            # Image is wider - scale by width
+            new_width = self.display_width
+            new_height = int(self.display_width / img_ratio)
+        else:
+            # Image is taller - scale by height
+            new_height = self.display_height
+            new_width = int(self.display_height * img_ratio)
+
+        # Resize image with high quality
+        img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        # Create white background at EXACT display size
+        canvas = Image.new('RGB', (self.display_width, self.display_height), (255, 255, 255))
+
+        # Center image on canvas
+        x_offset = (self.display_width - new_width) // 2
+        y_offset = (self.display_height - new_height) // 2
+        canvas.paste(img_resized, (x_offset, y_offset))
+
+        logger.info(
+            f"  Scaled: {img.size} → {new_width}x{new_height}, centered on {self.display_width}x{self.display_height} canvas")
+
+        # Verify exact size
+        assert canvas.size == (self.display_width, self.display_height), \
+            f"Canvas size mismatch: {canvas.size} != {(self.display_width, self.display_height)}"
+
+        return canvas
+
+    def _process_fill_image(self, img: Image.Image) -> Image.Image:
+        """
+        Scale and crop image to fill entire display
+        May crop parts of the image to maintain aspect ratio
+        ALWAYS returns exactly display_width x display_height
+        """
+        # Calculate scaling to fill display
+        img_ratio = img.width / img.height
+        display_ratio = self.display_width / self.display_height
+
+        if img_ratio > display_ratio:
+            # Image is wider - scale by height and crop width
+            new_height = self.display_height
+            new_width = int(self.display_height * img_ratio)
+        else:
+            # Image is taller - scale by width and crop height
+            new_width = self.display_width
+            new_height = int(self.display_width / img_ratio)
+
+        # Resize image with high quality
+        img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        # Center crop to exact display size
+        x_offset = (new_width - self.display_width) // 2
+        y_offset = (new_height - self.display_height) // 2
+        img_cropped = img_resized.crop((
+            x_offset,
+            y_offset,
+            x_offset + self.display_width,
+            y_offset + self.display_height
+        ))
+
+        logger.info(
+            f"  Scaled: {img.size} → {new_width}x{new_height}, cropped to {self.display_width}x{self.display_height}")
+
+        # Verify exact size
+        assert img_cropped.size == (self.display_width, self.display_height), \
+            f"Cropped size mismatch: {img_cropped.size} != {(self.display_width, self.display_height)}"
+
+        return img_cropped
+
+    def upload_image(self, image_path: Path) -> bool:
+        """Upload image to TRMNL webhook (or skip if dry run)"""
+        try:
+            logger.info(f"Uploading: {image_path.name}")
+
+            # Process image for optimal display
+            image_data, content_type = self.process_image(image_path)
+
+            # Check if dry run mode
+            dry_run = os.getenv('DRY_RUN', 'false').lower() == 'true'
+
+            if dry_run:
+                logger.info(f"✓ DRY RUN: Skipped upload of {image_path.name}")
+                logger.info(f"  Would upload: {len(image_data) / 1024:.1f}KB {content_type}")
+                logger.info(f"  Check /data/last_processed.png to see result")
+                return True
+
+            # Validate image size
+            size_mb = len(image_data) / (1024 * 1024)
+            if size_mb > 5:
+                logger.error(f"✗ Image too large: {size_mb:.2f}MB (max 5MB)")
+                return False
+
+            logger.info(f"  Sending {len(image_data) / 1024:.1f}KB {content_type.split('/')[-1].upper()} to TRMNL")
+
+            # Upload to TRMNL
+            response = requests.post(
+                self.webhook_url,
+                data=image_data,
+                headers={'Content-Type': content_type},
+                timeout=30
+            )
+
+            # Check response
+            if response.status_code == 200:
+                logger.info(f"✓ Successfully uploaded {image_path.name}")
+                logger.info(f"  Response: {response.status_code}")
+            elif response.status_code == 422:
+                logger.error(f"✗ Upload rejected (422): Image format or size invalid")
+                return False
+            elif response.status_code == 429:
+                logger.error(f"✗ Rate limited (429): Too many uploads (max 12/hour)")
+                return False
+            else:
+                logger.error(f"✗ Upload failed with status {response.status_code}")
+                return False
+
+            response.raise_for_status()
+
+            # Update state
+            self.state['last_image'] = str(image_path.relative_to(self.images_dir))
+            self.state['last_upload'] = datetime.now().isoformat()
+            self._save_state()
+
+            return True
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"✗ Upload failed: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"✗ Error uploading image: {e}")
+            return False
+
+    def run(self):
+        """Main loop - upload images at specified interval"""
+        logger.info("Starting image uploader...")
+        logger.info(f"Next upload in {self.interval_seconds} seconds")
+
+        # Upload immediately on start
+        images = self.get_image_files()
+        if images:
+            next_image = self.select_next_image(images)
+            if next_image:
+                self.upload_image(next_image)
+
+        # Continue with scheduled uploads
+        while True:
+            try:
+                time.sleep(self.interval_seconds)
+
+                # Refresh image list each time (in case new images added)
+                images = self.get_image_files()
+
+                if not images:
+                    logger.warning("No images found, waiting for next interval...")
+                    continue
+
+                next_image = self.select_next_image(images)
+                if next_image and next_image.exists():
+                    self.upload_image(next_image)
+                else:
+                    logger.warning(f"Selected image not found: {next_image}")
+
+            except KeyboardInterrupt:
+                logger.info("Shutting down...")
+                break
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}")
+                time.sleep(60)  # Wait a minute before retrying
+
+
+def main():
+    # Get configuration from environment variables
+    webhook_url = os.getenv('WEBHOOK_URL')
+    images_dir = os.getenv('IMAGES_DIR', '/images')
+    interval_minutes = int(os.getenv('INTERVAL_MINUTES', '60'))
+    selection_mode = os.getenv('SELECTION_MODE', 'random').lower()
+    include_subfolders = os.getenv('INCLUDE_SUBFOLDERS', 'true').lower() == 'true'
+    display_width = int(os.getenv('DISPLAY_WIDTH', '800'))
+    display_height = int(os.getenv('DISPLAY_HEIGHT', '480'))
+    bit_depth = int(os.getenv('BIT_DEPTH', '1'))
+
+    # Validate configuration
+    if not webhook_url:
+        logger.error("WEBHOOK_URL environment variable is required!")
+        logger.error("Get your webhook URL from TRMNL plugin settings")
+        exit(1)
+
+    if not os.path.exists(images_dir):
+        logger.error(f"Images directory not found: {images_dir}")
+        logger.error("Make sure to mount a directory to /images")
+        exit(1)
+
+    # Validate selection mode
+    valid_modes = ['random', 'sequential', 'shuffle', 'newest', 'oldest']
+    if selection_mode not in valid_modes:
+        logger.error(f"Invalid SELECTION_MODE: {selection_mode}")
+        logger.error(f"Valid modes: {', '.join(valid_modes)}")
+        exit(1)
+
+    # Validate bit depth
+    if bit_depth not in [1, 2]:
+        logger.error(f"Invalid BIT_DEPTH: {bit_depth}. Must be 1 or 2.")
+        exit(1)
+
+    # Create and run uploader
+    uploader = ImageUploader(
+        webhook_url=webhook_url,
+        images_dir=images_dir,
+        interval_minutes=interval_minutes,
+        selection_mode=selection_mode,
+        include_subfolders=include_subfolders,
+        display_width=display_width,
+        display_height=display_height,
+        bit_depth=bit_depth
+    )
+
+    uploader.run()
+
+
+if __name__ == '__main__':
+    main()
