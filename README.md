@@ -1,34 +1,38 @@
 # TRMNL Image Webhook
 
-Automatically upload images from your photo collection to your TRMNL e-ink display with proper 1-bit dithering for beautiful grayscale rendering.
+Automatically upload images from your photo collection to your TRMNL e-ink display with proper dithering for beautiful grayscale rendering.
 
 ## Features
 
-- 📸 **Automatic Image Processing** - Scales and converts photos to 1-bit e-ink format
+- 📸 **Automatic Image Processing** - Scales and converts photos to e-ink format
 - 🎨 **Floyd-Steinberg Dithering** - Professional halftone effect for smooth gradients
+- 🖼️ **2-bit Grayscale** - 4 shades of gray for better quality than pure black & white
 - 🎲 **Multiple Selection Modes** - Random, sequential, shuffle, newest, or oldest
+- 🔄 **Auto-Rotation** - Respects EXIF orientation data
+- 🖼️ **Flexible Layouts** - Auto, landscape, or portrait modes
+- 🎯 **Orientation Filtering** - Show only landscape or portrait photos (with smart caching)
+- 🎨 **Border Styles** - White, black, or blurred borders
 - 📁 **Subfolder Support** - Organize photos in folders and subfolders
 - 🏷️ **Optional Labels** - Show filename or path on images
 - 🐳 **Docker Ready** - Easy deployment with docker-compose
 - 💾 **State Management** - Remembers position for sequential/shuffle modes
 - 🔍 **Debug Mode** - Saves processed images for inspection
 - 🧪 **Dry Run** - Test without uploading
+- 🔔 **Version Checking** - Notifies when updates are available
 
 ## Quick Start
 
 ### 1. Get Your Webhook URL
 
 1. Log into [TRMNL](https://usetrmnl.com)
-2. Go to [Plugins > Webhook Image](https://usetrmnl.com/plugin_settings?keyname=webhook_image)
-3. Click "Add new"
-4. Save with a name as you want
-5. Copy your webhook URL
+2. Go to Plugins > Webhook Image
+3. Click "Add to my plugins"
+4. Copy your webhook URL
 
 ### 2. Set Up Configuration
 
 ```bash
-git clone https://github.com/ExcuseMi/trmnl-image-webhook.git
-
+# Clone or download this repository
 cd trmnl-image-webhook
 
 # Copy example config
@@ -65,8 +69,12 @@ That's it! Your TRMNL will start showing photos from your collection.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DISPLAY_WIDTH` | `800` | Display width (OG: 800) |
-| `DISPLAY_HEIGHT` | `480` | Display height (OG: 480) |
+| `BIT_DEPTH` | `2` | Bit depth: 1 = black/white, 2 = 4 grays (recommended) |
+| `DISPLAY_WIDTH` | `800` | Display width (OG: 800, Plus: 1280) |
+| `DISPLAY_HEIGHT` | `480` | Display height (OG: 480, Plus: 800) |
+| `LAYOUT` | `auto` | Orientation: auto/landscape/portrait |
+| `ORIENTATION_FILTER` | `any` | Filter images: any/landscape/portrait |
+| `BORDER_STYLE` | `white` | Border style: white/black/blur |
 | `INTERVAL_MINUTES` | `60` | Minutes between uploads |
 | `SELECTION_MODE` | `random` | How to pick images (see below) |
 | `INCLUDE_SUBFOLDERS` | `true` | Include images from subdirectories |
@@ -94,6 +102,23 @@ Example with label:
 ```bash
 IMAGE_LABEL=path
 ```
+
+## Image Processing
+
+
+### Why Dithering?
+
+TRMNL displays are 1-bit (pure black and white). Dithering creates the illusion of grayscale by using patterns of black and white dots - like newspaper photos. This makes photos look much better than simple thresholding.
+
+**With dithering:**
+- Smooth gradients in sky, skin tones, etc.
+- Details visible in shadows and highlights
+- Professional halftone appearance
+
+**Without dithering:**
+- Harsh black/white contrast
+- Loss of detail
+- Posterized look
 
 ## Examples
 
@@ -142,7 +167,7 @@ IMAGE_LABEL=path
 docker-compose up -d
 
 # View logs
-docker-compose logs -f trmnl-image-webhook
+docker-compose logs -f
 
 # Stop
 docker-compose down
@@ -151,14 +176,59 @@ docker-compose down
 docker-compose restart
 ```
 
-One-liner to update and restart the application after setting the .env
+### Synology NAS
+
+1. Enable Docker in Package Center
+2. Upload project folder to your NAS
+3. Edit `.env` with your settings
+4. SSH into NAS:
 ```bash
-git pull && docker compose down && docker compose build && docker compose up -d
+cd /volume1/docker/trmnl-image-webhook
+docker-compose up -d
 ```
 
+### Raspberry Pi
 
+```bash
+# Install Docker
+curl -fsSL https://get.docker.com | sh
+
+# Clone and configure
+git clone <repo-url>
+cd trmnl-image-webhook
+cp .env.example .env
+nano .env
+
+# Run
+docker-compose up -d
+```
 
 ## Debugging
+
+### Check Logs
+
+```bash
+docker-compose logs -f
+```
+
+Look for:
+```
+Found X images
+Converting to grayscale
+Converting to 1-bit with Floyd-Steinberg dithering  
+Final: 800x480 1-bit PNG, 25.3KB
+✓ Successfully uploaded image.jpg
+Response: 200
+```
+
+### Inspect Processed Images
+
+Every upload saves two files to `./data/`:
+
+- `last_original.jpg` - Original unprocessed photo
+- `last_processed.png` - Final 1-bit dithered PNG sent to TRMNL
+
+Compare these to see exactly what's being displayed.
 
 ### Dry Run Mode
 
@@ -177,19 +247,52 @@ docker-compose restart
 - Set `INCLUDE_SUBFOLDERS=true` if images are in subdirectories
 - Verify image formats (PNG, JPG, JPEG, BMP, GIF supported)
 
+**Images not displaying on TRMNL**
+
+- Check device WiFi connection
+- Verify webhook URL is correct
+- Try "Force Refresh" in TRMNL plugin settings
+- Check `data/last_processed.png` looks correct
 
 **Rate limited (429 error)**
 
 - TRMNL allows max 12 uploads per hour
 - Increase `INTERVAL_MINUTES` to 60 or higher
 
+**Upload rejected (422 error)**
+
+- Image may be corrupted
+- File over 5MB limit (shouldn't happen with processing)
+- Try different source image
+
 ## Technical Details
 
 ### Supported Image Formats
 
-Input: PNG, JPEG, JPG, BMP, GIF
-Output: 1-bit PNG
+Input: PNG, JPEG, JPG, BMP, GIF  
+Output: 1-bit or 2-bit grayscale PNG (default: 2-bit)
 
+### Bit Depth Options
+
+**2-bit (Default - Recommended):**
+- 4 shades of gray (0, 85, 170, 255)
+- Smoother gradients and better photo quality
+- Smaller file sizes (~5-10KB)
+- Supported on TRMNL OG firmware v1.7.2+
+
+**1-bit (Classic):**
+- Pure black and white (2 colors)
+- Sharper, higher contrast
+- Slightly larger files (~15-30KB)
+- Maximum compatibility
+
+Both modes use Floyd-Steinberg dithering for professional halftone effects.
+
+### File Sizes
+
+- Input: Any size (auto-scaled)
+- Output: ~15-40KB (1-bit PNG)
+- Limit: 5MB (rarely reached)
 
 ### Display Sizes
 
@@ -199,6 +302,30 @@ DISPLAY_WIDTH=800
 DISPLAY_HEIGHT=480
 ```
 
+**TRMNL Plus:**
+```bash
+DISPLAY_WIDTH=1280
+DISPLAY_HEIGHT=800
+```
+
+### State Management
+
+For `sequential` and `shuffle` modes, position is saved in `./data/state.json`:
+
+```json
+{
+  "last_image": "vacation/photo.jpg",
+  "current_index": 42,
+  "last_upload": "2024-12-31T16:20:57"
+}
+```
+
+## Performance
+
+- **Memory**: ~50MB
+- **CPU**: Minimal (only during processing)
+- **Network**: ~20-40KB per upload
+- **Storage**: State file <1KB
 
 ## Requirements
 
@@ -209,6 +336,11 @@ DISPLAY_HEIGHT=480
 ## License
 
 MIT License - see LICENSE file
+
+## Contributing
+
+Issues and pull requests welcome!
+
 ## Support
 
 For issues with:
@@ -216,3 +348,6 @@ For issues with:
 - **TRMNL device/service**: Contact TRMNL support
 - **Docker/deployment**: Check Docker logs first
 
+## Credits
+
+Developed for the TRMNL community. Inspired by TRMNL's own image processing code.
