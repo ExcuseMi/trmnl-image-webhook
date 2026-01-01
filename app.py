@@ -337,24 +337,40 @@ class ImageUploader:
                 if label_mode != 'none':
                     processed = self._add_label(processed, image_path, label_mode)
 
-                # Step 3: Convert to 1-bit with Floyd-Steinberg dithering
+                # Step 3: Convert to 1-bit or 2-bit
+                bit_depth = int(os.getenv('BIT_DEPTH', '2'))  # Default to 2-bit for better quality
                 use_dither = os.getenv('USE_DITHERING', 'true').lower() == 'true'
 
-                if use_dither:
-                    logger.info(f"  Converting to 1-bit with Floyd-Steinberg dithering")
-                    processed = processed.convert('1', dither=Image.Dither.FLOYDSTEINBERG)
+                if bit_depth == 1:
+                    # 1-bit: Use Pillow's Floyd-Steinberg
+                    if use_dither:
+                        logger.info(f"  Converting to 1-bit with Floyd-Steinberg dithering")
+                        processed = processed.convert('1', dither=Image.Dither.FLOYDSTEINBERG)
+                    else:
+                        logger.info(f"  Converting to 1-bit without dithering")
+                        processed = processed.convert('1', dither=Image.Dither.NONE)
+
+                    # Save as 1-bit PNG (Pillow default)
+                    output = io.BytesIO()
+                    processed.save(output, format='PNG', optimize=True)
+                    image_bytes = output.getvalue()
+
+                elif bit_depth == 2:
+                    # 2-bit: Dither to 4 gray levels with Floyd-Steinberg
+                    logger.info(f"  Converting to 2-bit with Floyd-Steinberg dithering")
+                    processed = processed.convert('L')
+
+                    if use_dither:
+                        # Apply Floyd-Steinberg dithering to 4 levels
+                        processed = self._dither_to_4_levels(processed)
+
+                    # Save as proper 2-bit grayscale PNG
+                    image_bytes = self._save_2bit_png(processed)
                 else:
-                    logger.info(f"  Converting to 1-bit without dithering")
-                    processed = processed.convert('1', dither=Image.Dither.NONE)
+                    raise ValueError(f"Unsupported bit depth: {bit_depth}")
 
-                # Save as 1-bit PNG
-                output = io.BytesIO()
-                processed.save(output, format='PNG', optimize=True)
-
-                image_bytes = output.getvalue()
                 size_kb = len(image_bytes) / 1024
-
-                logger.info(f"  Final: {self.display_width}x{self.display_height} 1-bit PNG, {size_kb:.1f}KB")
+                logger.info(f"  Final: {self.display_width}x{self.display_height} {bit_depth}-bit PNG, {size_kb:.1f}KB")
 
                 # Clean up old original files (removes previous extensions)
                 for old_file in Path('/data').glob('last_original.*'):
@@ -381,6 +397,106 @@ class ImageUploader:
             logger.error(f"Falling back to original image")
             with open(image_path, 'rb') as f:
                 return f.read(), 'image/jpeg'
+
+    def _dither_to_4_levels(self, img: Image.Image) -> Image.Image:
+        """
+        Apply Floyd-Steinberg dithering to 4 gray levels (for 2-bit).
+
+        Quantizes to: 0 (black), 85 (dark gray), 170 (light gray), 255 (white)
+        """
+        # Convert to grayscale if needed
+        if img.mode != 'L':
+            img = img.convert('L')
+
+        # Get pixel data as list
+        width, height = img.size
+        pixels = list(img.getdata())
+
+        # Create mutable array
+        img_array = [list(pixels[i * width:(i + 1) * width]) for i in range(height)]
+
+        # Floyd-Steinberg dithering
+        for y in range(height):
+            for x in range(width):
+                old_pixel = img_array[y][x]
+
+                # Find nearest level (0, 85, 170, 255)
+                if old_pixel < 43:
+                    new_pixel = 0
+                elif old_pixel < 128:
+                    new_pixel = 85
+                elif old_pixel < 213:
+                    new_pixel = 170
+                else:
+                    new_pixel = 255
+
+                img_array[y][x] = new_pixel
+                error = old_pixel - new_pixel
+
+                # Distribute error to neighboring pixels
+                if x + 1 < width:
+                    img_array[y][x + 1] = max(0, min(255, img_array[y][x + 1] + error * 7 // 16))
+                if y + 1 < height:
+                    if x > 0:
+                        img_array[y + 1][x - 1] = max(0, min(255, img_array[y + 1][x - 1] + error * 3 // 16))
+                    img_array[y + 1][x] = max(0, min(255, img_array[y + 1][x] + error * 5 // 16))
+                    if x + 1 < width:
+                        img_array[y + 1][x + 1] = max(0, min(255, img_array[y + 1][x + 1] + error * 1 // 16))
+
+        # Convert back to image
+        flat_pixels = [pixel for row in img_array for pixel in row]
+        dithered = Image.new('L', (width, height))
+        dithered.putdata(flat_pixels)
+        return dithered
+
+    def _save_2bit_png(self, img: Image.Image) -> bytes:
+        """
+        Save grayscale image as 2-bit PNG using pypng.
+
+        Quantizes to 4 gray levels: 0 (black), 85 (dark), 170 (light), 255 (white)
+        Creates native 2-bit grayscale PNG (color type 0, bit depth 2)
+        """
+        try:
+            import png
+        except ImportError:
+            raise ImportError("pypng required for 2-bit PNG support. Run: pip install pypng")
+
+        # Convert to grayscale if needed
+        if img.mode != 'L':
+            img = img.convert('L')
+
+        width, height = img.size
+        pixels = list(img.getdata())
+
+        # Quantize to 4 levels (0, 1, 2, 3)
+        rows = []
+        for y in range(height):
+            row = []
+            for x in range(width):
+                pixel = pixels[y * width + x]
+                # Map 0-255 to 0-3
+                if pixel < 64:
+                    value = 0  # Black
+                elif pixel < 128:
+                    value = 1  # Dark gray
+                elif pixel < 192:
+                    value = 2  # Light gray
+                else:
+                    value = 3  # White
+                row.append(value)
+            rows.append(row)
+
+        # Write 2-bit grayscale PNG
+        output = io.BytesIO()
+        writer = png.Writer(
+            width=width,
+            height=height,
+            greyscale=True,
+            bitdepth=2
+        )
+        writer.write(output, rows)
+
+        return output.getvalue()
 
     def _add_label(self, img: Image.Image, image_path: Path, label_mode: str) -> Image.Image:
         """Add filename or path label to image"""
