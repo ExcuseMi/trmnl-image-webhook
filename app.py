@@ -298,19 +298,16 @@ class ImageUploader:
     def process_image(self, image_path: Path) -> Tuple[bytes, str]:
         """
         Process image for TRMNL e-ink display
-        Matches TRMNL's own processing: grayscale → optional dithering → bilevel
-        Returns: (image_bytes, content_type)
+        Isolates dithering to the image content only to prevent margin bleed.
         """
         try:
             with Image.open(image_path) as img:
-                # Auto-rotate based on EXIF orientation data
+                # 1. Standardize Orientation/Color
                 from PIL import ImageOps
                 img = ImageOps.exif_transpose(img)
                 if img is None:
-                    # If exif_transpose returns None, re-open
                     img = Image.open(image_path)
 
-                # Convert to RGB first
                 if img.mode == 'RGBA':
                     background = Image.new('RGB', img.size, (255, 255, 255))
                     background.paste(img, mask=img.split()[3])
@@ -318,107 +315,105 @@ class ImageUploader:
                 elif img.mode != 'RGB':
                     img = img.convert('RGB')
 
-                # Scale to fit display (always use 'single' mode for simplicity)
-                processed = self._process_single_image(img)
+                # 2. Resize Content (Isolate logic from _process_single_image)
+                margin = int(os.getenv('MARGIN', '0'))
+                available_w = self.display_width - (2 * margin)
+                available_h = self.display_height - (2 * margin)
 
-                # Ensure exact dimensions
-                if processed.size != (self.display_width, self.display_height):
-                    processed = processed.resize(
-                        (self.display_width, self.display_height),
-                        Image.Resampling.LANCZOS
-                    )
+                img_ratio = img.width / img.height
+                display_ratio = available_w / available_h
 
-                # Step 1: Convert to grayscale
-                logger.info(f"  Converting to grayscale")
-                processed = processed.convert('L')
+                if img_ratio > display_ratio:
+                    new_w, new_h = available_w, int(available_w / img_ratio)
+                else:
+                    new_h, new_w = available_h, int(available_h * img_ratio)
 
-                # Step 2: Optional label
-                label_mode = os.getenv('IMAGE_LABEL', 'none').lower()
-                if label_mode != 'none':
-                    processed = self._add_label(processed, image_path, label_mode)
+                img_resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-                # Step 3: Convert to 1-bit or 2-bit
-                bit_depth = int(os.getenv('BIT_DEPTH', '2'))  # Default to 2-bit for better quality
+                # 3. Dither ONLY the resized image
+                img_l = img_resized.convert('L')
+                bit_depth = int(os.getenv('BIT_DEPTH', '2'))
                 use_dither = os.getenv('USE_DITHERING', 'true').lower() == 'true'
 
-                if bit_depth == 1:
-                    # 1-bit: Use Pillow's Floyd-Steinberg
-                    if use_dither:
-                        logger.info(f"  Converting to 1-bit with Floyd-Steinberg dithering")
-                        processed = processed.convert('1', dither=Image.Dither.FLOYDSTEINBERG)
+                if use_dither:
+                    logger.info(f"  Dithering image content (Isolation Mode)")
+                    if bit_depth == 1:
+                        img_processed = img_l.convert('1', dither=Image.Dither.FLOYDSTEINBERG).convert('L')
                     else:
-                        logger.info(f"  Converting to 1-bit without dithering")
-                        processed = processed.convert('1', dither=Image.Dither.NONE)
-
-                    # Save as 1-bit PNG (Pillow default)
-                    output = io.BytesIO()
-                    processed.save(output, format='PNG', optimize=True)
-                    image_bytes = output.getvalue()
-
-                elif bit_depth == 2:
-                    # 2-bit: Dither to 4 gray levels with Floyd-Steinberg
-                    logger.info(f"  Converting to 2-bit with Floyd-Steinberg dithering")
-                    processed = processed.convert('L')
-
-                    if use_dither:
-                        # Apply Floyd-Steinberg dithering to 4 levels
-                        processed = self._dither_to_4_levels(processed)
-
-                    # Save as proper 2-bit grayscale PNG
-                    image_bytes = self._save_2bit_png(processed)
+                        img_processed = self._dither_to_4_levels(img_l)
                 else:
-                    raise ValueError(f"Unsupported bit depth: {bit_depth}")
+                    img_processed = img_l
 
-                size_kb = len(image_bytes) / 1024
-                logger.info(f"  Final: {self.display_width}x{self.display_height} {bit_depth}-bit PNG, {size_kb:.1f}KB")
+                # 4. Create Clean Canvas (Pure background)
+                border_style = os.getenv('BORDER_STYLE', 'white').lower()
+                bg_color = 0 if border_style == 'black' else 255
+                canvas = Image.new('L', (self.display_width, self.display_height), bg_color)
 
-                # Clean up old original files (removes previous extensions)
+                # 5. Paste Dithered Content onto Clean Canvas
+                x_offset = (self.display_width - new_w) // 2
+                y_offset = (self.display_height - new_h) // 2
+                canvas.paste(img_processed, (x_offset, y_offset))
+
+                # 6. Generate final bytes
+                if bit_depth == 1:
+                    final_output = canvas.convert('1', dither=Image.Dither.NONE)
+                    output = io.BytesIO()
+                    final_output.save(output, format='PNG', optimize=True)
+                    image_bytes = output.getvalue()
+                else:
+                    image_bytes = self._save_2bit_png(canvas)
+
+                # --- DEBUG SAVING (The part that was missing) ---
+                # Clean up old original files
                 for old_file in Path('/data').glob('last_original.*'):
                     old_file.unlink()
 
-                # ALWAYS save original image for debugging (use lowercase extension)
+                # Save original
                 ext = image_path.suffix.lower()
                 original_path = Path(f'/data/last_original{ext}')
                 with open(image_path, 'rb') as src:
                     with open(original_path, 'wb') as dst:
                         dst.write(src.read())
-                logger.info(f"  Saved original to {original_path}")
 
-                # ALWAYS save processed image for debugging
+                # Save processed
                 processed_path = Path('/data/last_processed.png')
                 with open(processed_path, 'wb') as f:
                     f.write(image_bytes)
-                logger.info(f"  Saved processed to {processed_path}")
+
+                logger.info(f"  Saved debug images to /data/")
+                # ------------------------------------------------
 
                 return image_bytes, 'image/png'
 
         except Exception as e:
             logger.error(f"Error processing image: {e}")
-            logger.error(f"Falling back to original image")
             with open(image_path, 'rb') as f:
                 return f.read(), 'image/jpeg'
 
     def _dither_to_4_levels(self, img: Image.Image) -> Image.Image:
         """
-        Apply Floyd-Steinberg dithering to 4 gray levels (for 2-bit).
-
-        Quantizes to: 0 (black), 85 (dark gray), 170 (light gray), 255 (white)
+        Apply Floyd-Steinberg dithering to 4 gray levels with a
+        threshold to protect solid backgrounds/margins.
         """
-        # Convert to grayscale if needed
         if img.mode != 'L':
             img = img.convert('L')
 
-        # Get pixel data as list
         width, height = img.size
         pixels = list(img.getdata())
-
-        # Create mutable array
         img_array = [list(pixels[i * width:(i + 1) * width]) for i in range(height)]
 
-        # Floyd-Steinberg dithering
         for y in range(height):
             for x in range(width):
                 old_pixel = img_array[y][x]
+
+                # THRESHOLD FIX: If pixel is nearly white or black,
+                # snap it to pure and skip error distribution.
+                if old_pixel >= 254:
+                    img_array[y][x] = 255
+                    continue
+                if old_pixel <= 1:
+                    img_array[y][x] = 0
+                    continue
 
                 # Find nearest level (0, 85, 170, 255)
                 if old_pixel < 43:
@@ -443,12 +438,10 @@ class ImageUploader:
                     if x + 1 < width:
                         img_array[y + 1][x + 1] = max(0, min(255, img_array[y + 1][x + 1] + error * 1 // 16))
 
-        # Convert back to image
         flat_pixels = [pixel for row in img_array for pixel in row]
         dithered = Image.new('L', (width, height))
         dithered.putdata(flat_pixels)
         return dithered
-
     def _save_2bit_png(self, img: Image.Image) -> bytes:
         """
         Save grayscale image as 2-bit PNG using pypng.
@@ -549,21 +542,29 @@ class ImageUploader:
     def _process_single_image(self, img: Image.Image) -> Image.Image:
         """
         Scale image to fit display while maintaining aspect ratio
-        Centers with configurable border style
+        Centers with configurable border style and optional margin
         ALWAYS returns exactly display_width x display_height
         """
-        # Calculate scaling to fit within display
+        # Get margin setting
+        margin = int(os.getenv('MARGIN', '0'))
+        margin = max(0, min(100, margin))  # Clamp to 0-100
+
+        # Calculate available space after margin
+        available_width = self.display_width - (2 * margin)
+        available_height = self.display_height - (2 * margin)
+
+        # Calculate scaling to fit within available space
         img_ratio = img.width / img.height
-        display_ratio = self.display_width / self.display_height
+        display_ratio = available_width / available_height
 
         if img_ratio > display_ratio:
             # Image is wider - scale by width
-            new_width = self.display_width
-            new_height = int(self.display_width / img_ratio)
+            new_width = available_width
+            new_height = int(available_width / img_ratio)
         else:
             # Image is taller - scale by height
-            new_height = self.display_height
-            new_width = int(self.display_height * img_ratio)
+            new_height = available_height
+            new_width = int(available_height * img_ratio)
 
         # Resize image with high quality
         img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
@@ -584,13 +585,16 @@ class ImageUploader:
             # White borders (default, clean look)
             canvas = Image.new('RGB', (self.display_width, self.display_height), (255, 255, 255))
 
-        # Center image on canvas
+        # Center image on canvas (accounting for margin)
         x_offset = (self.display_width - new_width) // 2
         y_offset = (self.display_height - new_height) // 2
         canvas.paste(img_resized, (x_offset, y_offset))
 
-        logger.info(
-            f"  Scaled: {img.size} → {new_width}x{new_height}, centered on {self.display_width}x{self.display_height} canvas")
+        if margin > 0:
+            logger.info(f"  Scaled: {img.size} → {new_width}x{new_height}, centered with {margin}px margin")
+        else:
+            logger.info(
+                f"  Scaled: {img.size} → {new_width}x{new_height}, centered on {self.display_width}x{self.display_height} canvas")
 
         # Verify exact size
         assert canvas.size == (self.display_width, self.display_height), \

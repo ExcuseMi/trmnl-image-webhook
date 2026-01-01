@@ -70,11 +70,12 @@ That's it! Your TRMNL will start showing photos from your collection.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BIT_DEPTH` | `2` | Bit depth: 1 = black/white, 2 = 4 grays (recommended) |
-| `DISPLAY_WIDTH` | `800` | Display width (OG: 800, Plus: 1280) |
-| `DISPLAY_HEIGHT` | `480` | Display height (OG: 480, Plus: 800) |
+| `DISPLAY_WIDTH` | `800` | Display width (OG: 800) |
+| `DISPLAY_HEIGHT` | `480` | Display height (OG: 480) |
 | `LAYOUT` | `auto` | Orientation: auto/landscape/portrait |
 | `ORIENTATION_FILTER` | `any` | Filter images: any/landscape/portrait |
 | `BORDER_STYLE` | `white` | Border style: white/black/blur |
+| `MARGIN` | `0` | Margin in pixels (0-100) for framed look |
 | `INTERVAL_MINUTES` | `60` | Minutes between uploads |
 | `SELECTION_MODE` | `random` | How to pick images (see below) |
 | `INCLUDE_SUBFOLDERS` | `true` | Include images from subdirectories |
@@ -105,6 +106,13 @@ IMAGE_LABEL=path
 
 ## Image Processing
 
+### What Happens to Your Photos
+
+1. **Scaling** - Resized to fit display (800x480 or 1280x800)
+2. **Grayscale** - Converted to grayscale
+3. **Dithering** - Floyd-Steinberg dithering applied for smooth gradients
+4. **1-bit Conversion** - Pure black and white (2 colors)
+5. **PNG Export** - Optimized 1-bit PNG (~20-40KB)
 
 ### Why Dithering?
 
@@ -167,7 +175,7 @@ IMAGE_LABEL=path
 docker-compose up -d
 
 # View logs
-docker-compose logs -f trmnl-image-webhook
+docker-compose logs -f  trmnl-image-webhook
 
 # Stop
 docker-compose down
@@ -175,34 +183,6 @@ docker-compose down
 # Restart after config changes
 docker-compose restart
 ```
-
-### Synology NAS
-
-1. Enable Docker in Package Center
-2. Upload project folder to your NAS
-3. Edit `.env` with your settings
-4. SSH into NAS:
-```bash
-cd /volume1/docker/trmnl-image-webhook
-docker-compose up -d
-```
-
-### Raspberry Pi
-
-```bash
-# Install Docker
-curl -fsSL https://get.docker.com | sh
-
-# Clone and configure
-git clone <repo-url>
-cd trmnl-image-webhook
-cp .env.example .env
-nano .env
-
-# Run
-docker-compose up -d
-```
-
 ## Debugging
 
 ### Check Logs
@@ -258,13 +238,7 @@ docker-compose restart
 
 - TRMNL allows max 12 uploads per hour
 - Increase `INTERVAL_MINUTES` to 60 or higher
-
-**Upload rejected (422 error)**
-
-- Image may be corrupted
-- File over 5MB limit (shouldn't happen with processing)
-- Try different source image
-
+- 
 ## Technical Details
 
 ### Supported Image Formats
@@ -300,12 +274,6 @@ Both modes use Floyd-Steinberg dithering for professional halftone effects.
 ```bash
 DISPLAY_WIDTH=800
 DISPLAY_HEIGHT=480
-```
-
-**TRMNL Plus:**
-```bash
-DISPLAY_WIDTH=1280
-DISPLAY_HEIGHT=800
 ```
 
 ### State Management
