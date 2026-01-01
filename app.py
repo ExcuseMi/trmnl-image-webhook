@@ -486,13 +486,14 @@ class ImageUploader:
                 row.append(value)
             rows.append(row)
 
-        # Write 2-bit grayscale PNG
+        # Write 2-bit grayscale PNG with maximum compression
         output = io.BytesIO()
         writer = png.Writer(
             width=width,
             height=height,
             greyscale=True,
-            bitdepth=2
+            bitdepth=2,
+            compression=9  # Maximum compression to stay under TRMNL's ~50KB limit
         )
         writer.write(output, rows)
 
