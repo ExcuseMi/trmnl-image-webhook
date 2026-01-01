@@ -167,7 +167,7 @@ IMAGE_LABEL=path
 docker-compose up -d
 
 # View logs
-docker-compose logs -f
+docker-compose logs -f trmnl-image-webhook
 
 # Stop
 docker-compose down
