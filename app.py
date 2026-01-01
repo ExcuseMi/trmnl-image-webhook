@@ -62,6 +62,7 @@ def check_for_updates():
 class ImageUploader:
     SUPPORTED_FORMATS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif'}
     STATE_FILE = '/data/state.json'
+    ORIENTATION_CACHE_FILE = '/data/orientation_cache.json'
 
     def __init__(self,
                  webhook_url: str,
@@ -131,6 +132,25 @@ class ImageUploader:
         except Exception as e:
             logger.error(f"Could not save state file: {e}")
 
+    def _load_orientation_cache(self) -> dict:
+        """Load orientation cache from file"""
+        try:
+            if os.path.exists(self.ORIENTATION_CACHE_FILE):
+                with open(self.ORIENTATION_CACHE_FILE, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not load orientation cache: {e}")
+        return {}
+
+    def _save_orientation_cache(self, cache: dict):
+        """Save orientation cache to file"""
+        try:
+            os.makedirs(os.path.dirname(self.ORIENTATION_CACHE_FILE), exist_ok=True)
+            with open(self.ORIENTATION_CACHE_FILE, 'w') as f:
+                json.dump(cache, f)
+        except Exception as e:
+            logger.error(f"Could not save orientation cache: {e}")
+
     def get_image_files(self) -> List[Path]:
         """Get all supported image files from directory"""
         images = []
@@ -151,33 +171,67 @@ class ImageUploader:
 
         # Filter by orientation if specified
         if self.orientation_filter != 'any':
+            logger.info(f"Filtering images by orientation: {self.orientation_filter}")
+
+            # Load orientation cache
+            cache = self._load_orientation_cache()
             filtered_images = []
+            cache_updated = False
+            total = len(images)
+            checked = 0
+
             for img_path in images:
                 try:
-                    with Image.open(img_path) as img:
-                        # Apply EXIF rotation to get actual dimensions
-                        from PIL import ImageOps
-                        img = ImageOps.exif_transpose(img)
-                        if img is None:
-                            img = Image.open(img_path)
+                    # Cache key is relative path + modification time
+                    rel_path = str(img_path.relative_to(self.images_dir))
+                    mtime = img_path.stat().st_mtime
+                    cache_key = f"{rel_path}:{mtime}"
 
-                        width, height = img.size
+                    # Check cache first
+                    if cache_key in cache:
+                        orientation = cache[cache_key]
+                    else:
+                        # Not in cache, need to check
+                        checked += 1
+                        if checked % 100 == 0:
+                            logger.info(f"  Checking new/modified images: {checked}...")
 
-                        # Determine if image is landscape or portrait
-                        is_landscape = width > height
-                        is_portrait = height > width
+                        with Image.open(img_path) as img:
+                            # Apply EXIF rotation to get actual dimensions
+                            from PIL import ImageOps
+                            img = ImageOps.exif_transpose(img)
+                            if img is None:
+                                img = Image.open(img_path)
 
-                        # Filter based on setting
-                        if self.orientation_filter == 'landscape' and is_landscape:
-                            filtered_images.append(img_path)
-                        elif self.orientation_filter == 'portrait' and is_portrait:
-                            filtered_images.append(img_path)
-                        # Skip square images and images that don't match filter
+                            width, height = img.size
+
+                            # Determine orientation
+                            if width > height:
+                                orientation = 'landscape'
+                            elif height > width:
+                                orientation = 'portrait'
+                            else:
+                                orientation = 'square'
+
+                        # Update cache
+                        cache[cache_key] = orientation
+                        cache_updated = True
+
+                    # Filter based on orientation
+                    if self.orientation_filter == 'landscape' and orientation == 'landscape':
+                        filtered_images.append(img_path)
+                    elif self.orientation_filter == 'portrait' and orientation == 'portrait':
+                        filtered_images.append(img_path)
 
                 except Exception as e:
                     logger.debug(f"Could not check orientation of {img_path.name}: {e}")
                     # Include image if we can't determine orientation
                     filtered_images.append(img_path)
+
+            # Save cache if updated
+            if cache_updated:
+                self._save_orientation_cache(cache)
+                logger.info(f"  Updated orientation cache ({checked} new/modified images)")
 
             logger.info(f"Filtered to {len(filtered_images)} {self.orientation_filter} images")
             images = filtered_images
@@ -283,7 +337,7 @@ class ImageUploader:
                 if label_mode != 'none':
                     processed = self._add_label(processed, image_path, label_mode)
 
-                # Step 3: Convert to 1-bit for TRMNL (only 1-bit is supported)
+                # Step 3: Convert to 1-bit with Floyd-Steinberg dithering
                 use_dither = os.getenv('USE_DITHERING', 'true').lower() == 'true'
 
                 if use_dither:
@@ -295,7 +349,7 @@ class ImageUploader:
 
                 # Save as 1-bit PNG
                 output = io.BytesIO()
-                processed.save(output, format='PNG', optimize=True, bits=1)
+                processed.save(output, format='PNG', optimize=True)
 
                 image_bytes = output.getvalue()
                 size_kb = len(image_bytes) / 1024
