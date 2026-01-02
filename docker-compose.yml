@@ -1,7 +1,7 @@
 services:
   trmnl-image-webhook:
     # Use published image from GitHub Container Registry
-    image: ghcr.io/excusemi/trmnl-image-webhook:1.0.3
+    image: ghcr.io/excusemi/trmnl-image-webhook:1.0.4
 
     # Or build locally (comment out 'image' above and uncomment below)
     # build: .
