@@ -73,7 +73,8 @@ class ImageUploader:
                  display_width: int = 800,
                  display_height: int = 480,
                  layout: str = 'auto',
-                 orientation_filter: str = 'any'):
+                 orientation_filter: str = 'any',
+                 gamma : float = 1.5):
         self.webhook_url = webhook_url
         self.images_dir = Path(images_dir)
         self.interval_seconds = interval_minutes * 60
@@ -81,6 +82,7 @@ class ImageUploader:
         self.include_subfolders = include_subfolders
         self.layout = layout
         self.orientation_filter = orientation_filter
+        self.gamma = gamma
 
         # Adjust dimensions based on layout
         if layout == 'portrait':
@@ -332,6 +334,16 @@ class ImageUploader:
 
                 # 3. Dither ONLY the resized image
                 img_l = img_resized.convert('L')
+
+                # Apply Gamma Correction
+                # Values > 1.0 brighten the midtones. 1.5 is usually the "sweet spot" for TRMNL.
+                if self.gamma != 1.0:
+                    # Create a lookup table for gamma correction
+                    # formula: output = input^(1/gamma)
+                    lut = [int(pow(i / 255.0, 1.0 / self.gamma) * 255.0) for i in range(256)]
+                    img_l = img_l.point(lut)
+                    logger.info(f"  Applied gamma correction: {self.gamma}")
+
                 bit_depth = int(os.getenv('BIT_DEPTH', '2'))
                 use_dither = os.getenv('USE_DITHERING', 'true').lower() == 'true'
 
@@ -758,7 +770,7 @@ def main():
     display_height = int(os.getenv('DISPLAY_HEIGHT', '480'))
     layout = os.getenv('LAYOUT', 'auto').lower()
     orientation_filter = os.getenv('ORIENTATION_FILTER', 'any').lower()
-
+    gamma = float(os.getenv('GAMMA', '1.5'))
     # Validate configuration
     if not webhook_url:
         logger.error("WEBHOOK_URL environment variable is required!")
@@ -801,7 +813,8 @@ def main():
         display_width=display_width,
         display_height=display_height,
         layout=layout,
-        orientation_filter=orientation_filter
+        orientation_filter=orientation_filter,
+        gamma=gamma
     )
 
     uploader.run()
