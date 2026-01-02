@@ -74,7 +74,7 @@ class ImageUploader:
                  display_height: int = 480,
                  layout: str = 'auto',
                  orientation_filter: str = 'any',
-                 gamma : float = 1.5):
+                 gamma: float = 1.5):
         self.webhook_url = webhook_url
         self.images_dir = Path(images_dir)
         self.interval_seconds = interval_minutes * 60
@@ -317,8 +317,9 @@ class ImageUploader:
                 elif img.mode != 'RGB':
                     img = img.convert('RGB')
 
-                # 2. Resize Content (Isolate logic from _process_single_image)
+                # 2. Resize Content
                 margin = int(os.getenv('MARGIN', '0'))
+                margin = max(0, min(100, margin))
                 available_w = self.display_width - (2 * margin)
                 available_h = self.display_height - (2 * margin)
 
@@ -336,10 +337,7 @@ class ImageUploader:
                 img_l = img_resized.convert('L')
 
                 # Apply Gamma Correction
-                # Values > 1.0 brighten the midtones. 1.5 is usually the "sweet spot" for TRMNL.
                 if self.gamma != 1.0:
-                    # Create a lookup table for gamma correction
-                    # formula: output = input^(1/gamma)
                     lut = [int(pow(i / 255.0, 1.0 / self.gamma) * 255.0) for i in range(256)]
                     img_l = img_l.point(lut)
                     logger.info(f"  Applied gamma correction: {self.gamma}")
@@ -348,7 +346,7 @@ class ImageUploader:
                 use_dither = os.getenv('USE_DITHERING', 'true').lower() == 'true'
 
                 if use_dither:
-                    logger.info(f"  Dithering image content (Isolation Mode)")
+                    logger.info(f"  Dithering image content (isolation mode)")
                     if bit_depth == 1:
                         img_processed = img_l.convert('1', dither=Image.Dither.FLOYDSTEINBERG).convert('L')
                     else:
@@ -356,7 +354,7 @@ class ImageUploader:
                 else:
                     img_processed = img_l
 
-                # 4. Create Clean Canvas (Pure background)
+                # 4. Create Clean Canvas
                 border_style = os.getenv('BORDER_STYLE', 'white').lower()
                 bg_color = 0 if border_style == 'black' else 255
                 canvas = Image.new('L', (self.display_width, self.display_height), bg_color)
@@ -366,7 +364,11 @@ class ImageUploader:
                 y_offset = (self.display_height - new_h) // 2
                 canvas.paste(img_processed, (x_offset, y_offset))
 
-                # 6. Generate final bytes
+                # 6. Add frame border if requested
+                if margin > 0:
+                    canvas = self._add_frame_border(canvas, margin)
+
+                # 7. Generate final bytes
                 if bit_depth == 1:
                     final_output = canvas.convert('1', dither=Image.Dither.NONE)
                     output = io.BytesIO()
@@ -375,25 +377,21 @@ class ImageUploader:
                 else:
                     image_bytes = self._save_2bit_png(canvas)
 
-                # --- DEBUG SAVING (The part that was missing) ---
-                # Clean up old original files
+                # Save debug images
                 for old_file in Path('/data').glob('last_original.*'):
                     old_file.unlink()
 
-                # Save original
                 ext = image_path.suffix.lower()
                 original_path = Path(f'/data/last_original{ext}')
                 with open(image_path, 'rb') as src:
                     with open(original_path, 'wb') as dst:
                         dst.write(src.read())
 
-                # Save processed
                 processed_path = Path('/data/last_processed.png')
                 with open(processed_path, 'wb') as f:
                     f.write(image_bytes)
 
                 logger.info(f"  Saved debug images to /data/")
-                # ------------------------------------------------
 
                 return image_bytes, 'image/png'
 
@@ -454,6 +452,133 @@ class ImageUploader:
         dithered = Image.new('L', (width, height))
         dithered.putdata(flat_pixels)
         return dithered
+
+    def _add_frame_border(self, img: Image.Image, margin: int) -> Image.Image:
+        """
+        Add decorative frame border around the image content.
+        Only applies when margin > 0.
+        """
+        frame_style = os.getenv('FRAME_BORDER', 'none').lower()
+
+        if frame_style == 'none' or margin == 0:
+            return img
+
+        frame_width = int(os.getenv('FRAME_BORDER_WIDTH', '2'))
+        frame_width = max(1, min(10, frame_width))  # Clamp 1-10
+
+        # Get background color from border style
+        border_style = os.getenv('BORDER_STYLE', 'white').lower()
+        bg_color = 0 if border_style == 'black' else 255
+
+        # Scan to find image boundaries
+        pixels = img.load()
+        width, height = img.size
+
+        # Find left edge
+        x1 = margin
+        for x in range(margin, width - margin):
+            has_content = False
+            for y in range(height):
+                if pixels[x, y] != bg_color:
+                    has_content = True
+                    break
+            if has_content:
+                x1 = x
+                break
+
+        # Find right edge
+        x2 = width - margin - 1
+        for x in range(width - margin - 1, margin, -1):
+            has_content = False
+            for y in range(height):
+                if pixels[x, y] != bg_color:
+                    has_content = True
+                    break
+            if has_content:
+                x2 = x
+                break
+
+        # Find top edge
+        y1 = margin
+        for y in range(margin, height - margin):
+            has_content = False
+            for x in range(width):
+                if pixels[x, y] != bg_color:
+                    has_content = True
+                    break
+            if has_content:
+                y1 = y
+                break
+
+        # Find bottom edge
+        y2 = height - margin - 1
+        for y in range(height - margin - 1, margin, -1):
+            has_content = False
+            for x in range(width):
+                if pixels[x, y] != bg_color:
+                    has_content = True
+                    break
+            if has_content:
+                y2 = y
+                break
+
+        # Create a copy to work with
+        framed = img.copy()
+
+        # For rounded borders, mask the corners pixel by pixel
+        if frame_style == 'rounded':
+            radius = min(15, min(x2 - x1, y2 - y1) // 15)  # Corner radius
+            framed_pixels = framed.load()
+
+            # For each corner, we want to paint the corner SQUARE minus the inner ARC
+            # Distance is measured from the INSIDE corner point (where the arc center is)
+            for dy in range(radius):
+                for dx in range(radius):
+                    # Distance from the arc center point (which is INSIDE the image by radius)
+                    dist_sq = (radius - dx - 1) * (radius - dx - 1) + (radius - dy - 1) * (radius - dy - 1)
+
+                    # If this point is INSIDE the corner square but OUTSIDE the arc radius
+                    if dist_sq > radius * radius:
+                        # Paint with background color to round the corner
+                        # Top-left corner
+                        if x1 + dx < width and y1 + dy < height:
+                            framed_pixels[x1 + dx, y1 + dy] = bg_color
+                        # Top-right corner
+                        if x2 - dx >= 0 and y1 + dy < height:
+                            framed_pixels[x2 - dx, y1 + dy] = bg_color
+                        # Bottom-left corner
+                        if x1 + dx < width and y2 - dy >= 0:
+                            framed_pixels[x1 + dx, y2 - dy] = bg_color
+                        # Bottom-right corner
+                        if x2 - dx >= 0 and y2 - dy >= 0:
+                            framed_pixels[x2 - dx, y2 - dy] = bg_color
+
+        # Now draw the border
+        draw = ImageDraw.Draw(framed)
+        frame_color = 0 if bg_color == 255 else 255
+
+        if frame_style == 'line':
+            # Simple rectangular border
+            for i in range(frame_width):
+                draw.rectangle([x1 - i - 1, y1 - i - 1, x2 + i + 1, y2 + i + 1], outline=frame_color)
+
+        elif frame_style == 'rounded':
+            # Draw rounded border
+            for i in range(frame_width):
+                offset = i + 1
+                try:
+                    draw.rounded_rectangle(
+                        [x1 - offset, y1 - offset, x2 + offset, y2 + offset],
+                        radius=radius,
+                        outline=frame_color,
+                        width=1
+                    )
+                except AttributeError:
+                    draw.rectangle([x1 - offset, y1 - offset, x2 + offset, y2 + offset], outline=frame_color)
+
+        logger.info(f"  Added {frame_style} frame border ({frame_width}px) at image edges")
+        return framed
+
     def _save_2bit_png(self, img: Image.Image) -> bytes:
         """
         Save grayscale image as 2-bit PNG using pypng.
@@ -503,157 +628,6 @@ class ImageUploader:
         writer.write(output, rows)
 
         return output.getvalue()
-
-    def _add_label(self, img: Image.Image, image_path: Path, label_mode: str) -> Image.Image:
-        """Add filename or path label to image"""
-        from PIL import ImageDraw, ImageFont
-
-        # Get label text
-        if label_mode == 'filename':
-            label_text = image_path.name
-        elif label_mode == 'path':
-            label_text = str(image_path.relative_to(self.images_dir))
-        else:
-            return img
-
-        # Create a copy to draw on
-        labeled = img.copy()
-        draw = ImageDraw.Draw(labeled)
-
-        # Try to use a nice font, fallback to default
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
-        except:
-            try:
-                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
-            except:
-                font = ImageFont.load_default()
-
-        # Get text size
-        bbox = draw.textbbox((0, 0), label_text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-
-        # Position at bottom with padding
-        padding = 10
-        x = padding
-        y = self.display_height - text_height - padding - 5
-
-        # Draw black background rectangle
-        draw.rectangle(
-            [x - 5, y - 5, x + text_width + 5, y + text_height + 5],
-            fill=0  # Black background
-        )
-
-        # Draw white text
-        draw.text((x, y), label_text, fill=255, font=font)
-
-        logger.info(f"  Added label: {label_text}")
-        return labeled
-
-    def _process_single_image(self, img: Image.Image) -> Image.Image:
-        """
-        Scale image to fit display while maintaining aspect ratio
-        Centers with configurable border style and optional margin
-        ALWAYS returns exactly display_width x display_height
-        """
-        # Get margin setting
-        margin = int(os.getenv('MARGIN', '0'))
-        margin = max(0, min(100, margin))  # Clamp to 0-100
-
-        # Calculate available space after margin
-        available_width = self.display_width - (2 * margin)
-        available_height = self.display_height - (2 * margin)
-
-        # Calculate scaling to fit within available space
-        img_ratio = img.width / img.height
-        display_ratio = available_width / available_height
-
-        if img_ratio > display_ratio:
-            # Image is wider - scale by width
-            new_width = available_width
-            new_height = int(available_width / img_ratio)
-        else:
-            # Image is taller - scale by height
-            new_height = available_height
-            new_width = int(available_height * img_ratio)
-
-        # Resize image with high quality
-        img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-        # Get border style
-        border_style = os.getenv('BORDER_STYLE', 'white').lower()
-
-        # Create canvas based on border style
-        if border_style == 'black':
-            # Black borders for classic framing
-            canvas = Image.new('RGB', (self.display_width, self.display_height), (0, 0, 0))
-        elif border_style == 'blur':
-            # Blurred background - scale original to fill, blur heavily
-            canvas = img.resize((self.display_width, self.display_height), Image.Resampling.LANCZOS)
-            from PIL import ImageFilter
-            canvas = canvas.filter(ImageFilter.GaussianBlur(radius=20))
-        else:
-            # White borders (default, clean look)
-            canvas = Image.new('RGB', (self.display_width, self.display_height), (255, 255, 255))
-
-        # Center image on canvas (accounting for margin)
-        x_offset = (self.display_width - new_width) // 2
-        y_offset = (self.display_height - new_height) // 2
-        canvas.paste(img_resized, (x_offset, y_offset))
-
-        if margin > 0:
-            logger.info(f"  Scaled: {img.size} → {new_width}x{new_height}, centered with {margin}px margin")
-        else:
-            logger.info(
-                f"  Scaled: {img.size} → {new_width}x{new_height}, centered on {self.display_width}x{self.display_height} canvas")
-
-        # Verify exact size
-        assert canvas.size == (self.display_width, self.display_height), \
-            f"Canvas size mismatch: {canvas.size} != {(self.display_width, self.display_height)}"
-
-        return canvas
-
-    def _process_fill_image(self, img: Image.Image) -> Image.Image:
-        """
-        Scale and crop image to fill entire display
-        May crop parts of the image to maintain aspect ratio
-        ALWAYS returns exactly display_width x display_height
-        """
-        # Calculate scaling to fill display
-        img_ratio = img.width / img.height
-        display_ratio = self.display_width / self.display_height
-
-        if img_ratio > display_ratio:
-            # Image is wider - scale by height and crop width
-            new_height = self.display_height
-            new_width = int(self.display_height * img_ratio)
-        else:
-            # Image is taller - scale by width and crop height
-            new_width = self.display_width
-            new_height = int(self.display_width / img_ratio)
-
-        # Resize image with high quality
-        img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-        # Center crop to exact display size
-        x_offset = (new_width - self.display_width) // 2
-        y_offset = (new_height - self.display_height) // 2
-        img_cropped = img_resized.crop((
-            x_offset,
-            y_offset,
-            x_offset + self.display_width,
-            y_offset + self.display_height
-        ))
-
-        logger.info(
-            f"  Scaled: {img.size} → {new_width}x{new_height}, cropped to {self.display_width}x{self.display_height}")
-
-        # Verify exact size
-        assert img_cropped.size == (self.display_width, self.display_height), \
-            f"Cropped size mismatch: {img_cropped.size} != {(self.display_width, self.display_height)}"
-
-        return img_cropped
 
     def upload_image(self, image_path: Path) -> bool:
         """Upload image to TRMNL webhook (or skip if dry run)"""
@@ -771,6 +745,7 @@ def main():
     layout = os.getenv('LAYOUT', 'auto').lower()
     orientation_filter = os.getenv('ORIENTATION_FILTER', 'any').lower()
     gamma = float(os.getenv('GAMMA', '1.5'))
+
     # Validate configuration
     if not webhook_url:
         logger.error("WEBHOOK_URL environment variable is required!")

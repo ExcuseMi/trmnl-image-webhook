@@ -8,8 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-RUN pip install --no-cache-dir requests Pillow pypng
+# Install Python dependencies from requirements.txt
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
 
 # Create directories
 RUN mkdir -p /images /data
