@@ -1,6 +1,8 @@
 # TRMNL Image Webhook
 
 Automatically upload images from your photo collection to your TRMNL e-ink display with proper dithering for beautiful grayscale rendering.
+## Example output
+![beach-2bit-dither-800x480.png](example_images/beach-2bit-dither-800x480.png) 
 
 ## Features
 
